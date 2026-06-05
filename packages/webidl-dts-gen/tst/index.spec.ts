@@ -253,6 +253,38 @@ describe('convert', () => {
       await expectSourceToBeEqual(actual, expected)
     })
 
+    it('merges parent operation overloads when child redeclares with incompatible arity', async () => {
+      const idl = `
+        interface btVector3 {
+            void setValue(float x, float y, float z);
+        };
+        interface btVector4 {
+            void btVector4();
+            void btVector4(float x, float y, float z, float w);
+            float w();
+            void setValue(float x, float y, float z, float w);
+        };
+        btVector4 implements btVector3;
+      `
+
+      const actual = await convert(idl, { emscripten: true })
+
+      const expected = withDefaultEmscriptenOutput(`
+        class btVector3 {
+            setValue(x: number, y: number, z: number): void;
+        }
+        class btVector4 extends btVector3 {
+            constructor();
+            constructor(x: number, y: number, z: number, w: number);
+            w(): number;
+            setValue(x: number, y: number, z: number): void;
+            setValue(x: number, y: number, z: number, w: number): void;
+        }
+      `)
+
+      await expectSourceToBeEqual(actual, expected)
+    })
+
     it('supports "implements" identifiers with underscores', async () => {
       const idl = `
         interface Foo_Bar {

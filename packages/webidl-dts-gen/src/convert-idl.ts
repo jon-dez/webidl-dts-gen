@@ -211,6 +211,94 @@ function isFrozenArrayAttribute(member: webidl2.IDLInterfaceMemberType | webidl2
 
 type InterfaceIDL = webidl2.InterfaceType | webidl2.DictionaryType | webidl2.InterfaceMixinType | webidl2.NamespaceType
 
+function isInterfaceTypeWithName(rootType: webidl2.IDLRootType, name: string): rootType is webidl2.InterfaceType {
+  return rootType.type === 'interface' && rootType.name === name
+}
+
+function findInterfaceByName(
+  rootTypes: webidl2.IDLRootType[],
+  name: string,
+) {
+  return rootTypes.find((rootType) => isInterfaceTypeWithName(rootType, name))
+}
+
+function findParentInterface(
+  idl: InterfaceIDL,
+  rootTypes: webidl2.IDLRootType[],
+) {
+  if (!('inheritance' in idl) || !idl.inheritance) {
+    return undefined
+  }
+
+  return findInterfaceByName(rootTypes, idl.inheritance)
+}
+
+function formatIdlType(idl: webidl2.IDLTypeDescription) {
+  if (typeof idl.idlType === 'string') {
+    return idl.nullable ? `${idl.idlType}?` : idl.idlType
+  }
+
+  if (idl.generic) {
+    const inner = idl.idlType.map(formatIdlType).join(',')
+    return idl.nullable ? `${idl.generic}<${inner}>?` : `${idl.generic}<${inner}>`
+  }
+
+  if (idl.union) {
+    return idl.idlType.map(formatIdlType).join('|')
+  }
+
+  return 'unknown'
+}
+
+function operationSignatureKey(operation: webidl2.OperationMemberType) {
+  const args = operation.arguments.map((arg) => formatIdlType(arg.idlType)).join(',')
+  return `${args}:${formatIdlType(operation.idlType)}`
+}
+
+function parentOperationsWithName(
+  parent: webidl2.InterfaceType,
+  name: string,
+) {
+  return parent.members.filter(
+    (member): member is webidl2.OperationMemberType =>
+      member.type === 'operation' && member.name === name && member.name !== parent.name,
+  )
+}
+
+function emitMemberOperationWithParentOverloads(
+  member: webidl2.OperationMemberType,
+  idl: InterfaceIDL,
+  options: Options,
+  rootTypes: webidl2.IDLRootType[],
+  isEmscriptenJSImplementation: boolean,
+  baseMethodNames?: Set<string>,
+) {
+  const childMethod = convertMemberOperation(member, isEmscriptenJSImplementation, options, baseMethodNames)
+
+  if (isEmscriptenJSImplementation) {
+    return [childMethod]
+  }
+
+  const parent = findParentInterface(idl, rootTypes)
+  if (!parent) {
+    return [childMethod]
+  }
+
+  const childSignature = operationSignatureKey(member)
+  const parentOperations = parentOperationsWithName(parent, member.name).filter(
+    (operation) => operationSignatureKey(operation) !== childSignature,
+  )
+
+  if (!parentOperations.length) {
+    return [childMethod]
+  }
+
+  return [
+    ...parentOperations.map((operation) => convertMemberOperation(operation, false, options, undefined)),
+    childMethod,
+  ]
+}
+
 function convertInterface(idl: InterfaceIDL, options: Options, rootTypes: webidl2.IDLRootType[]) {
   const emscriptenJSImplementation = options.emscripten && idl.extAttrs.find((attr) => attr.name === 'JSImplementation')
 
@@ -277,7 +365,16 @@ function convertInterface(idl: InterfaceIDL, options: Options, rootTypes: webidl
         if (member.name === idl.name) {
           members.push(convertMemberConstructor(member, options))
         } else {
-          members.push(convertMemberOperation(member, !!emscriptenJSImplementation, options, baseMethodNames))
+          members.push(
+            ...emitMemberOperationWithParentOverloads(
+              member,
+              idl,
+              options,
+              rootTypes,
+              !!emscriptenJSImplementation,
+              baseMethodNames,
+            ),
+          )
         }
         break
       case 'constructor':
